@@ -26,7 +26,7 @@ import (
 	"github.com/gravitational/teleport"
 	"github.com/gravitational/teleport/lib/auth"
 	"github.com/gravitational/teleport/lib/defaults"
-	"github.com/gravitational/teleport/lib/reversetunnel/seek"
+	//"github.com/gravitational/teleport/lib/reversetunnel/seek"
 	"github.com/gravitational/teleport/lib/reversetunnel/track"
 	"github.com/gravitational/teleport/lib/services"
 	"github.com/gravitational/teleport/lib/utils"
@@ -533,6 +533,7 @@ func agentToTrackingKey(key agentKey) track.Key {
 	}
 }
 
+/*
 // seekToAgentKey converts between key types
 func seekToAgentKey(key seek.Key) agentKey {
 	return agentKey{
@@ -550,6 +551,7 @@ func agentToSeekKey(key agentKey) seek.Key {
 		Addr:    key.addr,
 	}
 }
+*/
 
 func (a *agentKey) String() string {
 	return fmt.Sprintf("agentKey(cluster=%v, type=%v, addr=%v)", a.clusterName, a.tunnelType, a.addr.String())
