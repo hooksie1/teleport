@@ -510,7 +510,6 @@ func (a *Agent) handleDiscovery(ch ssh.Channel, reqC <-chan *ssh.Request) {
 		var req *ssh.Request
 		select {
 		case <-a.ctx.Done():
-			a.Infof("Closed, returning.")
 			return
 		case req = <-reqC:
 			if req == nil {
@@ -527,7 +526,6 @@ func (a *Agent) handleDiscovery(ch ssh.Channel, reqC <-chan *ssh.Request) {
 				select {
 				case a.DiscoveryC <- r:
 				case <-a.ctx.Done():
-					a.Infof("Closed, returning.")
 					return
 				default:
 				}

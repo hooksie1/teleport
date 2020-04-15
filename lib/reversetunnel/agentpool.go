@@ -164,7 +164,7 @@ func NewAgentPool(cfg AgentPoolConfig) (*AgentPool, error) {
 
 // Start starts the agent pool
 func (m *AgentPool) Start() error {
-	m.Infof("Starting agent pool %s.%s...", m.cfg.HostUUID, m.cfg.Cluster)
+	m.Debugf("Starting agent pool %s.%s...", m.cfg.HostUUID, m.cfg.Cluster)
 	go m.pollAndSyncAgents()
 	go m.processSeekEvents()
 	return nil
