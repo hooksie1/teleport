@@ -1,0 +1,298 @@
+/*
+Copyright 2020 Gravitational, Inc.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package track
+
+import (
+	"context"
+	//"fmt"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/gravitational/teleport/lib/utils"
+	"github.com/gravitational/teleport/lib/utils/workpool"
+)
+
+type Lease = workpool.Lease
+
+// Key uniquely identifies a reversetunnel endpoint.
+type Key struct {
+	Cluster string
+	Type    string
+	Addr    utils.NetAddr
+}
+
+type Config struct {
+	ProxyExpiry time.Duration
+	TickRate    time.Duration
+}
+
+func (c *Config) SetDefaults() {
+	if c.ProxyExpiry < 1 {
+		c.ProxyExpiry = time.Minute * 3
+	}
+	if c.TickRate < 1 {
+		c.TickRate = time.Second * 30
+	}
+}
+
+// Tracker is a helper for tracking proxies located behind reverse tunnels
+// and triggering agent spawning as needed.
+type Tracker interface {
+	// Start starts tracking for specified key.
+	Start(key Key)
+	// Stop stops tracking for specified key.
+	Stop(key Key)
+	// Acquire grants access to the Acquire channel of the
+	// embedded work group.
+	Acquire() <-chan Lease
+	// MarkSeen starts/refreshes tracking for supplied proxies.
+	MarkSeen(lease Lease, proxies ...string)
+	// WithProxy runs the supplied closure if and only if
+	// no other work is currently being done with the proxy
+	// identified by principals.
+	WithProxy(work func(), lease Lease, principals ...string) (didWork bool)
+	// StopAll permanently deactivates this tracker and cleans
+	// up all background goroutines.
+	StopAll()
+}
+
+type proxyTracker struct {
+	sync.Mutex
+	Config
+	wp     workpool.Pool
+	sets   map[Key]*proxySet
+	ctx    context.Context
+	cancel context.CancelFunc
+}
+
+func New(ctx context.Context, c Config) Tracker {
+	ctx, cancel := context.WithCancel(ctx)
+	c.SetDefaults()
+	t := &proxyTracker{
+		Config: c,
+		wp:     workpool.NewPool(ctx),
+		sets:   make(map[Key]*proxySet),
+		ctx:    ctx,
+		cancel: cancel,
+	}
+	go t.run()
+	return t
+}
+
+func (t *proxyTracker) run() {
+	ticker := time.NewTicker(t.TickRate)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			t.Tick()
+		case <-t.ctx.Done():
+			return
+		}
+	}
+}
+
+func (p *proxyTracker) Acquire() <-chan Lease {
+	return p.wp.Acquire()
+}
+
+func (p *proxyTracker) MarkSeen(lease Lease, proxies ...string) {
+	p.Lock()
+	defer p.Unlock()
+	key := lease.Key().(Key)
+	set, ok := p.sets[key]
+	if !ok {
+		return
+	}
+	t := time.Now()
+	for _, name := range proxies {
+		set.markSeen(t, name)
+	}
+	count := len(set.proxies)
+	if count < 1 {
+		count = 1
+	}
+	p.wp.Set(key, uint64(count))
+}
+
+func (p *proxyTracker) Start(key Key) {
+	p.Lock()
+	defer p.Unlock()
+	p.getOrCreate(key)
+}
+
+func (p *proxyTracker) Stop(key Key) {
+	p.Lock()
+	defer p.Unlock()
+	if _, ok := p.sets[key]; !ok {
+		return
+	}
+	delete(p.sets, key)
+	p.wp.Set(key, 0)
+}
+
+func (p *proxyTracker) StopAll() {
+	p.cancel()
+}
+
+func (p *proxyTracker) Tick() {
+	p.Lock()
+	defer p.Unlock()
+	p.tick(time.Now())
+}
+
+func (p *proxyTracker) tick(t time.Time) {
+	cutoff := t.Add(-1 * p.ProxyExpiry)
+	for key, set := range p.sets {
+		if set.expire(cutoff) > 0 {
+			count := len(set.proxies)
+			if count < 1 {
+				count = 1
+			}
+			p.wp.Set(key, uint64(count))
+		}
+	}
+}
+
+func (p *proxyTracker) getOrCreate(key Key) *proxySet {
+	if s, ok := p.sets[key]; ok {
+		return s
+	}
+	set := newProxySet(key)
+	p.sets[key] = set
+	p.wp.Set(key, 1)
+	return set
+}
+
+func (p *proxyTracker) WithProxy(work func(), lease Lease, principals ...string) (didWork bool) {
+	key := lease.Key().(Key)
+	if ok := p.TryAcquire(key, principals...); !ok {
+		return false
+	}
+	defer p.Release(key, principals...)
+	work()
+	return true
+}
+
+func (p *proxyTracker) TryAcquire(key Key, principals ...string) (ok bool) {
+	p.Lock()
+	defer p.Unlock()
+	set, ok := p.sets[key]
+	if !ok {
+		return false
+	}
+	return set.tryAcquire(principals...)
+}
+
+func (p *proxyTracker) Release(key Key, principals ...string) {
+	p.Lock()
+	defer p.Unlock()
+	set, ok := p.sets[key]
+	if !ok {
+		return
+	}
+	set.release(principals...)
+}
+
+type entry struct {
+	lastSeen time.Time
+	claimed  bool
+}
+
+func newProxySet(key Key) *proxySet {
+	return &proxySet{
+		key:     key,
+		proxies: make(map[string]entry),
+	}
+}
+
+type proxySet struct {
+	key     Key
+	proxies map[string]entry
+}
+
+func (p *proxySet) tryAcquire(principals ...string) (ok bool) {
+	proxy := p.resolveName(principals)
+	e, ok := p.proxies[proxy]
+	if !ok {
+		p.proxies[proxy] = entry{
+			claimed: true,
+		}
+		return true
+	}
+	if e.claimed {
+		return false
+	}
+	e.claimed = true
+	p.proxies[proxy] = e
+	return true
+}
+
+func (p *proxySet) release(principals ...string) {
+	proxy := p.resolveName(principals)
+	p.proxies[proxy] = entry{
+		lastSeen: time.Now(),
+	}
+}
+
+func (p *proxySet) markSeen(t time.Time, proxy string) {
+	e, ok := p.proxies[proxy]
+	if !ok {
+		p.proxies[proxy] = entry{
+			lastSeen: t,
+		}
+		return
+	}
+	if e.lastSeen.After(t) {
+		return
+	}
+	e.lastSeen = t
+	p.proxies[proxy] = e
+}
+
+func (p *proxySet) expire(cutoff time.Time) (removed int) {
+	for name, entry := range p.proxies {
+		if entry.claimed {
+			continue
+		}
+		if entry.lastSeen.Before(cutoff) {
+			delete(p.proxies, name)
+			removed++
+		}
+	}
+	return
+}
+
+func (p *proxySet) resolveName(principals []string) string {
+	// check if we're already using one of these principals
+	for _, name := range principals {
+		if _, ok := p.proxies[name]; ok {
+			return name
+		}
+	}
+	// default to using the first principal
+	name := principals[0]
+	// if we have a `.<cluster-name>` suffix, remove it.
+	if strings.HasSuffix(name, p.key.Cluster) {
+		t := strings.TrimSuffix(name, p.key.Cluster)
+		if strings.HasSuffix(t, ".") {
+			name = strings.TrimSuffix(t, ".")
+		}
+	}
+	return name
+}
