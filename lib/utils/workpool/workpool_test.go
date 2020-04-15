@@ -29,25 +29,33 @@ import (
 func Example() {
 	pool := NewPool(context.TODO())
 	defer pool.Stop()
-	// single key which wants 3 concurrent workers.
-	pool.Set("my-key", 3)
+	// create two keys with different target counts
+	pool.Set("spam", 2)
+	pool.Set("eggs", 1)
+	// track how many workers are spawned for each key
+	counts := make(map[string]int)
+	var mu sync.Mutex
 	var wg sync.WaitGroup
-	// spawn 6 workers which have 50ms of work to do each.
-	for i := 0; i < 6; i++ {
+	for i := 0; i < 12; i++ {
 		wg.Add(1)
 		go func() {
 			lease := <-pool.Acquire()
 			defer lease.Release()
-			if k := lease.Key().(string); k != "my-key" {
-				panic("unexpected key: " + k)
-			}
-			time.Sleep(30 * time.Millisecond)
+			mu.Lock()
+			counts[lease.Key().(string)]++
+			mu.Unlock()
+			// in order to demonstrate the differing spawn rates we need
+			// work to take some time, otherwise pool will end up granting
+			// leases in a "round robin" fashion.
+			time.Sleep(time.Millisecond * 10)
 			wg.Done()
 		}()
 	}
-	start := time.Now()
 	wg.Wait()
-	fmt.Printf("%s", time.Since(start).Round(time.Millisecond*10)) // Output: 60ms
+	// exact counts will vary, but leases with key `spam`
+	// will end up being generated approximately twice as
+	// often as leases with key `eggs`.
+	fmt.Println(counts["spam"] > counts["eggs"]) // Output: true
 }
 
 func Test(t *testing.T) {
