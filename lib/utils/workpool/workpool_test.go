@@ -81,11 +81,6 @@ func (s *WorkSuite) TestPool(c *check.C) {
 	case <-time.After(time.Millisecond * 128):
 	}
 	var wg sync.WaitGroup
-	wgdone := make(chan struct{})
-	go func() {
-		wg.Wait()
-		close(wgdone)
-	}()
 	g1done := make(chan struct{})
 	p.Set(key, 200)
 	for i := 0; i < 200; i++ {
