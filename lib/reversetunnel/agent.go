@@ -30,7 +30,8 @@ import (
 	"github.com/gravitational/teleport"
 	"github.com/gravitational/teleport/lib/auth"
 	"github.com/gravitational/teleport/lib/defaults"
-	"github.com/gravitational/teleport/lib/reversetunnel/seek"
+	"github.com/gravitational/teleport/lib/reversetunnel/track"
+	//"github.com/gravitational/teleport/lib/reversetunnel/seek"
 	"github.com/gravitational/teleport/lib/services"
 	"github.com/gravitational/teleport/lib/sshutils"
 	"github.com/gravitational/teleport/lib/utils"
@@ -88,9 +89,11 @@ type AgentConfig struct {
 	ReverseTunnelServer Server
 	// LocalClusterName is the name of the cluster this agent is running in.
 	LocalClusterName string
+	// Tracker tracks proxy
+	Tracker track.Tracker
 	// Lease manages gossip and exclusive claims.  Lease may be nil
 	// when used in the context of tests.
-	Lease *seek.Lease
+	Lease track.Lease
 }
 
 // CheckAndSetDefaults checks parameters and sets default values
@@ -398,8 +401,8 @@ func (a *Agent) run() {
 	}
 	// if a SeekGroup was provided, then the agent shouldn't continue unless
 	// no other agents hold a claim.
-	if a.Lease != nil {
-		if !a.Lease.WithProxy(doWork, a.getPrincipalsList()...) {
+	if a.Lease != nil && a.Tracker != nil {
+		if !a.Tracker.WithProxy(doWork, a.Lease, a.getPrincipalsList()...) {
 			a.Debugf("Proxy already held by other agent: %v, releasing.", a.getPrincipalsList())
 		}
 	} else {
@@ -529,19 +532,10 @@ func (a *Agent) handleDiscovery(ch ssh.Channel, reqC <-chan *ssh.Request) {
 				default:
 				}
 			}
-			if a.Lease != nil {
-				// Broadcast proxies to the seek group.
-			Gossip:
-				for i, p := range r.Proxies {
-					select {
-					case a.Lease.Gossip() <- p.GetName():
-					case <-a.ctx.Done():
-						a.Infof("Closed, returning.")
-						return
-					default:
-						a.Warnf("Backlog in gossip channel, skipping %d proxies.", len(r.Proxies)-i)
-						break Gossip
-					}
+			if a.Lease != nil && a.Tracker != nil {
+				// Notify tracker of all known proxies.
+				for _, p := range r.Proxies {
+					a.Tracker.MarkSeen(a.Lease, p.GetName())
 				}
 			}
 		}
