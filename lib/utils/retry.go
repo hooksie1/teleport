@@ -80,6 +80,9 @@ type LinearConfig struct {
 	// to the delay.  Note that supplying a jitter means that
 	// successive calls to Duration may return different results.
 	Jitter Jitter
+	// AutoReset, if greater than zero, causes the linear retry to automatically
+	// reset after Max * AutoReset has elapsed since the last call to Incr.
+	AutoReset int64
 }
 
 // CheckAndSetDefaults checks and sets defaults
@@ -117,6 +120,7 @@ func newLinear(cfg LinearConfig) *Linear {
 type Linear struct {
 	// LinearConfig is a linear retry config
 	LinearConfig
+	lastIncr   time.Time
 	attempt    int64
 	closedChan chan time.Time
 }
@@ -134,6 +138,24 @@ func (r *Linear) Clone() Retry {
 // Inc increments attempt counter
 func (r *Linear) Inc() {
 	r.attempt++
+	if r.AutoReset < 1 {
+		// No AutoRest configured; we can skip
+		// everything else.
+		return
+	}
+	// when AutoReset is active, we track the time of the
+	// last call to Incr.  If more than Max * AutoReset has
+	// elapsed, we reset state internally.  This allows
+	// Linear to function like as a long-lived rate-limiting
+	// device.
+	prev := r.lastIncr
+	r.lastIncr = time.Now()
+	if prev.IsZero() {
+		return
+	}
+	if r.Max*time.Duration(r.AutoReset) < r.lastIncr.Sub(prev) {
+		r.Reset()
+	}
 }
 
 // Duration returns retry duration based on state
