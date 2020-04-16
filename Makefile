@@ -220,6 +220,7 @@ lint:
 		--exclude-use-default \
 		--skip-dirs vendor \
 		--max-issues-per-linter 0 \
+		--timeout=5m \
 		--enable unused \
 		$(FLAGS)
 
